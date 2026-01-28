@@ -254,10 +254,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit?: number;
         };
         const clampedLimit = Math.min(Math.max(1, limit), 50);
-        const results = dataLoader.search(query, domain as SearchDomain, clampedLimit);
+        const results = await dataLoader.search(query, domain as SearchDomain, clampedLimit);
 
         if (results.length === 0) {
-          const suggestions = dataLoader.findSimilar(query, 5, domain as SearchDomain);
+          const suggestions = await dataLoader.findSimilar(query, 5, domain as SearchDomain);
           if (suggestions.length > 0) {
             return {
               content: [{
@@ -290,7 +290,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const enriched = dataLoader.queryUIPropertyEnriched(componentProperty);
 
         if (!enriched) {
-          const suggestions = dataLoader.findSimilar(componentProperty, 3, 'ui');
+          const suggestions = await dataLoader.findSimilar(componentProperty, 3, 'ui');
           if (suggestions.length > 0) {
             return {
               content: [{
@@ -314,7 +314,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const enriched = dataLoader.queryScriptingAPIEnriched(apiCall);
 
         if (!enriched) {
-          const suggestions = dataLoader.findSimilar(apiCall, 3, 'api');
+          const suggestions = await dataLoader.findSimilar(apiCall, 3, 'api');
           if (suggestions.length > 0) {
             return {
               content: [{
@@ -338,7 +338,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const enriched = dataLoader.queryModuleParameterEnriched(moduleParameter);
 
         if (!enriched) {
-          const suggestions = dataLoader.findSimilar(moduleParameter, 3, 'modules');
+          const suggestions = await dataLoader.findSimilar(moduleParameter, 3, 'modules');
           if (suggestions.length > 0) {
             return {
               content: [{
@@ -365,7 +365,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           tags?: string[];
         };
 
-        const summaries = dataLoader.listSnippetsFiltered({ category, difficulty, tags });
+        const summaries = await dataLoader.listSnippetsFiltered({ category, difficulty, tags });
 
         return {
           content: [{
@@ -381,10 +381,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_snippet': {
         const { id } = args as { id: string };
-        const enriched = dataLoader.getSnippetEnriched(id);
+        const enriched = await dataLoader.getSnippetEnriched(id);
 
         if (!enriched) {
-          const allSnippets = dataLoader.listSnippets();
+          const allSnippets = await dataLoader.listSnippets();
           const similarIds = allSnippets
             .filter(s => s.id.includes(id) || s.title.toLowerCase().includes(id.toLowerCase()))
             .slice(0, 3)

@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -38,11 +38,36 @@ export class HISEDataLoader {
   // All searchable items for fuzzy matching
   private allItems: Array<{ id: string; domain: SearchDomain; name: string; description: string; keywords: string[] }> = [];
 
+  // Lazy-loading flag for snippets
+  private snippetsLoaded = false;
+
+  // Static stopwords set (optimization #3)
+  private static readonly STOPWORDS = new Set([
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 
+    'should', 'may', 'might', 'must', 'can', 'to', 'of', 'in', 'for', 'on', 
+    'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during', 'before', 
+    'after', 'above', 'below', 'between', 'under', 'again', 'further', 'then', 
+    'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 
+    'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 
+    'own', 'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but', 'if', 
+    'or', 'because', 'until', 'while', 'this', 'that', 'these', 'those', 'it', 'its'
+  ]);
+
   constructor() {
   }
 
   async loadData(dataPath: string = join(process.cwd(), 'data', 'hise-data.json')): Promise<void> {
     try {
+      // Optimization #1: Try to load from cache first
+      const cacheLoaded = await this.loadCache();
+      if (cacheLoaded) {
+        console.error('Loaded HISE data from cache');
+        return;
+      }
+
+      console.error('Building HISE data indexes...');
+      
       const uiPropertiesData = readFileSync(join(__dirname, '..', 'data', 'ui_component_properties.json'), 'utf8');
       const uiProperties = JSON.parse(uiPropertiesData);
       
@@ -52,19 +77,124 @@ export class HISEDataLoader {
       const processorsData = readFileSync(join(__dirname, '..', 'data', 'processors.json'), 'utf8');
       const processors = JSON.parse(processorsData);
       
-      const snippetData = readFileSync(join(__dirname, '..', 'data', 'snippet_dataset.json'), 'utf8');
-      const snippets = JSON.parse(snippetData);
-      
+      // Optimization #2: Don't load snippets yet (lazy load)
       this.data = {
         uiComponentProperties: this.transformUIProperties(uiProperties),
         scriptingAPI: this.transformScriptingAPI(apiMethods),
         moduleParameters: this.transformProcessors(processors),
-        codeSnippets: this.transformSnippets(snippets)
+        codeSnippets: [] // Will be loaded lazily
       };
       
       this.buildIndexes();
+      
+      // Save cache for next startup
+      await this.saveCache();
+      console.error('Built and cached HISE data indexes');
     } catch (error) {
       throw new Error(`Failed to load HISE data: ${error}`);
+    }
+  }
+
+  // Optimization #1: Cache management
+  private async loadCache(): Promise<boolean> {
+    try {
+      const cachePath = join(__dirname, '..', 'data', '.cache.json');
+      if (!existsSync(cachePath)) {
+        return false;
+      }
+
+      const cacheData = readFileSync(cachePath, 'utf8');
+      const cache = JSON.parse(cacheData);
+
+      // Check cache version (invalidate if data files changed)
+      const dataDir = join(__dirname, '..', 'data');
+      const uiMtime = this.getFileMtime(join(dataDir, 'ui_component_properties.json'));
+      const apiMtime = this.getFileMtime(join(dataDir, 'scripting_api.json'));
+      const procMtime = this.getFileMtime(join(dataDir, 'processors.json'));
+
+      if (cache.version !== '1.1' || 
+          cache.uiMtime !== uiMtime || 
+          cache.apiMtime !== apiMtime || 
+          cache.procMtime !== procMtime) {
+        console.error('Cache invalidated due to data file changes');
+        return false;
+      }
+
+      // Restore data and rebuild indexes (fast operation)
+      this.data = cache.data;
+      this.snippetsLoaded = false;
+      this.buildIndexes();
+
+      return true;
+    } catch (error) {
+      console.error('Failed to load cache:', error);
+      return false;
+    }
+  }
+
+  private async saveCache(): Promise<void> {
+    try {
+      const dataDir = join(__dirname, '..', 'data');
+      const cachePath = join(dataDir, '.cache.json');
+
+      // Only cache the transformed data, not the indexes (they're quick to rebuild)
+      const cache = {
+        version: '1.1',
+        uiMtime: this.getFileMtime(join(dataDir, 'ui_component_properties.json')),
+        apiMtime: this.getFileMtime(join(dataDir, 'scripting_api.json')),
+        procMtime: this.getFileMtime(join(dataDir, 'processors.json')),
+        data: this.data
+      };
+
+      writeFileSync(cachePath, JSON.stringify(cache));
+    } catch (error) {
+      console.error('Failed to save cache:', error);
+    }
+  }
+
+  private getFileMtime(path: string): number {
+    try {
+      const fs = require('fs');
+      return fs.statSync(path).mtimeMs;
+    } catch {
+      return 0;
+    }
+  }
+
+  // Optimization #2: Lazy load snippets
+  private async ensureSnippetsLoaded(): Promise<void> {
+    if (this.snippetsLoaded || !this.data) return;
+
+    try {
+      const snippetData = readFileSync(join(__dirname, '..', 'data', 'snippet_dataset.json'), 'utf8');
+      const snippets = JSON.parse(snippetData);
+      
+      this.data.codeSnippets = this.transformSnippets(snippets);
+      
+      // Build snippet indexes
+      for (const snippet of this.data.codeSnippets) {
+        this.snippetIndex.set(snippet.id, snippet);
+
+        const keywords = this.extractKeywords(
+          snippet.title,
+          snippet.description,
+          snippet.category,
+          ...snippet.tags
+        );
+        this.addToKeywordIndex(snippet.id, keywords);
+        this.allItems.push({
+          id: snippet.id,
+          domain: 'snippets',
+          name: snippet.title,
+          description: snippet.description,
+          keywords
+        });
+      }
+
+      this.snippetsLoaded = true;
+      console.error('Lazy-loaded snippets');
+    } catch (error) {
+      console.error('Failed to load snippets:', error);
     }
   }
 
@@ -249,42 +379,21 @@ export class HISEDataLoader {
       });
     }
 
-    // Index snippets
-    for (const snippet of this.data.codeSnippets) {
-      this.snippetIndex.set(snippet.id, snippet);
-
-      const keywords = this.extractKeywords(
-        snippet.title,
-        snippet.description,
-        snippet.category,
-        ...snippet.tags
-      );
-      this.addToKeywordIndex(snippet.id, keywords);
-      this.allItems.push({
-        id: snippet.id,
-        domain: 'snippets',
-        name: snippet.title,
-        description: snippet.description,
-        keywords
-      });
-    }
+    // Note: Snippets are now loaded lazily via ensureSnippetsLoaded()
   }
 
+  // Optimization #3: Optimized keyword extraction
   private extractKeywords(...texts: string[]): string[] {
     const keywords = new Set<string>();
-    const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but', 'if', 'or', 'because', 'until', 'while', 'this', 'that', 'these', 'those', 'it', 'its']);
 
     for (const text of texts) {
       if (!text) continue;
 
-      // Split camelCase and PascalCase
-      const expanded = text.replace(/([a-z])([A-Z])/g, '$1 $2');
-
-      // Extract words
-      const words = expanded.toLowerCase().match(/[a-z0-9]+/g) || [];
+      // Extract words in a single pass (no camelCase splitting for performance)
+      const words = text.toLowerCase().match(/[a-z0-9]+/g) || [];
 
       for (const word of words) {
-        if (word.length > 2 && !stopWords.has(word)) {
+        if (word.length > 2 && !HISEDataLoader.STOPWORDS.has(word)) {
           keywords.add(word);
         }
       }
@@ -326,7 +435,12 @@ export class HISEDataLoader {
   }
 
   // Find similar items when exact match fails (for "did you mean?" suggestions)
-  findSimilar(query: string, limit: number = 3, domain?: SearchDomain): string[] {
+  async findSimilar(query: string, limit: number = 3, domain?: SearchDomain): Promise<string[]> {
+    // Ensure snippets are loaded if searching in snippets domain
+    if (domain === 'all' || domain === 'snippets') {
+      await this.ensureSnippetsLoaded();
+    }
+
     const normalized = this.normalizeQuery(query);
     const results: Array<{ id: string; score: number }> = [];
 
@@ -373,11 +487,21 @@ export class HISEDataLoader {
     return score;
   }
 
-  // Unified search across all domains
-  search(query: string, domain: SearchDomain = 'all', limit: number = 10): SearchResult[] {
+  // Unified search across all domains (optimizations #4 and #5)
+  async search(query: string, domain: SearchDomain = 'all', limit: number = 10): Promise<SearchResult[]> {
+    // Ensure snippets are loaded if searching in snippets domain
+    if (domain === 'all' || domain === 'snippets') {
+      await this.ensureSnippetsLoaded();
+    }
+
     const normalized = this.normalizeQuery(query);
     const results: SearchResult[] = [];
     const seen = new Set<string>();
+
+    // Optimization #4: Filter items to search ONCE at the start
+    const itemsToSearch = domain === 'all' 
+      ? this.allItems 
+      : this.allItems.filter(item => item.domain === domain);
 
     // 1. Check for exact matches first
     if (domain === 'all' || domain === 'api') {
@@ -440,14 +564,18 @@ export class HISEDataLoader {
       }
     }
 
+    // Optimization #5: Early exit if we have enough exact matches
+    if (results.length >= limit) {
+      return results.slice(0, limit);
+    }
+
     // 2. Prefix matching (e.g., "Synth.*" or "*.setValue")
     const hasPrefixWildcard = normalized.includes('*');
     if (hasPrefixWildcard) {
       const pattern = normalized.replace(/\*/g, '.*');
       const regex = new RegExp(`^${pattern}$`, 'i');
 
-      for (const item of this.allItems) {
-        if (domain !== 'all' && item.domain !== domain) continue;
+      for (const item of itemsToSearch) {
         if (seen.has(item.id)) continue;
 
         if (regex.test(item.id) || regex.test(item.name.toLowerCase())) {
@@ -460,8 +588,18 @@ export class HISEDataLoader {
             matchType: 'prefix'
           });
           seen.add(item.id);
+
+          // Optimization #5: Early exit
+          if (results.length >= limit * 2) break;
         }
       }
+    }
+
+    // Optimization #5: Early exit after prefix matches
+    if (results.length >= limit) {
+      return results
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
     }
 
     // 3. Keyword matching
@@ -480,9 +618,8 @@ export class HISEDataLoader {
     for (const [itemId, matchCount] of keywordMatches) {
       if (seen.has(itemId)) continue;
 
-      const item = this.allItems.find(i => i.id === itemId);
+      const item = itemsToSearch.find(i => i.id === itemId);
       if (!item) continue;
-      if (domain !== 'all' && item.domain !== domain) continue;
 
       const score = Math.min(0.8, 0.3 + (matchCount / queryKeywords.length) * 0.5);
       results.push({
@@ -494,11 +631,20 @@ export class HISEDataLoader {
         matchType: 'keyword'
       });
       seen.add(itemId);
+
+      // Optimization #5: Early exit
+      if (results.length >= limit * 3) break;
     }
 
-    // 4. Fuzzy matching on remaining items
-    for (const item of this.allItems) {
-      if (domain !== 'all' && item.domain !== domain) continue;
+    // Optimization #5: Early exit after keyword matches
+    if (results.length >= limit) {
+      return results
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+    }
+
+    // 4. Fuzzy matching on remaining items (most expensive, do last)
+    for (const item of itemsToSearch) {
       if (seen.has(item.id)) continue;
 
       const score = this.calculateSimilarity(normalized, item.id, item.name.toLowerCase(), item.keywords);
@@ -512,6 +658,9 @@ export class HISEDataLoader {
           matchType: 'fuzzy'
         });
         seen.add(item.id);
+
+        // Optimization #5: Early exit
+        if (results.length >= limit * 5) break;
       }
     }
 
@@ -601,7 +750,9 @@ export class HISEDataLoader {
     };
   }
 
-  listSnippets(): SnippetSummary[] {
+  async listSnippets(): Promise<SnippetSummary[]> {
+    await this.ensureSnippetsLoaded();
+    
     if (!this.data) {
       return [];
     }
@@ -616,7 +767,9 @@ export class HISEDataLoader {
     }));
   }
 
-  getSnippet(id: string): CodeSnippet | null {
+  async getSnippet(id: string): Promise<CodeSnippet | null> {
+    await this.ensureSnippetsLoaded();
+    
     if (!this.data) {
       return null;
     }
@@ -632,8 +785,8 @@ export class HISEDataLoader {
   }
 
   // Enriched snippet that includes related items
-  getSnippetEnriched(id: string): EnrichedResult<CodeSnippet> | null {
-    const result = this.getSnippet(id);
+  async getSnippetEnriched(id: string): Promise<EnrichedResult<CodeSnippet> | null> {
+    const result = await this.getSnippet(id);
     if (!result) return null;
 
     return {
@@ -643,11 +796,13 @@ export class HISEDataLoader {
   }
 
   // List snippets with optional filtering
-  listSnippetsFiltered(options?: {
+  async listSnippetsFiltered(options?: {
     category?: string;
     difficulty?: "beginner" | "intermediate" | "advanced";
     tags?: string[];
-  }): SnippetSummary[] {
+  }): Promise<SnippetSummary[]> {
+    await this.ensureSnippetsLoaded();
+    
     if (!this.data) return [];
 
     let snippets = this.data.codeSnippets;
