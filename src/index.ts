@@ -487,7 +487,8 @@ async function main() {
 const isProduction = 
   args.includes('--production') || 
   args.includes('-p') || 
-  process.env.NODE_ENV === 'production'; 
+  process.env.NODE_ENV === 'production'
+  process.env.PORT !== undefined; // <--- ADD THIS; 
 
   if (isProduction) {
     console.error(`Starting HTTP server`);
