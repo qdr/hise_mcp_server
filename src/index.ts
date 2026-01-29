@@ -10,7 +10,7 @@ import {
   isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { HISEDataLoader } from './data-loader.js';
-import { UIComponentProperty, ScriptingAPIMethod, ModuleParameter, SearchDomain } from './types.js';
+import { UIComponentProperty, ScriptingAPIMethod, ModuleParameter } from './types.js';
 import express, { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 
@@ -470,28 +470,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
-  console.error("DEBUG: main() started");
-
-  try {
-    dataLoader = new HISEDataLoader();
-    await dataLoader.loadData();
-    console.error("Data loaded successfully.");
-  } catch (e) {
-    console.error("Warning: Data loader failed to initialize:", e);
-  }
+  dataLoader = new HISEDataLoader();
+  await dataLoader.loadData();
 
   const args = process.argv.slice(2);
-  
-  
-  // Check for the flag OR the environment variable you set in the .service file
-const isProduction = 
-  args.includes('--production') || 
-  args.includes('-p') || 
-  process.env.NODE_ENV === 'production'
-  process.env.PORT !== undefined; // <--- ADD THIS; 
+  const isProduction = args.includes('--production') || args.includes('-p');
+  const port = parseInt(process.env.PORT || '3000', 10);
 
   if (isProduction) {
-    console.error(`Starting HTTP server`);
     const app = express();
     app.use(express.json());
 
@@ -595,8 +581,7 @@ const isProduction =
       }
     });
 
-    app.listen(port, '0.0.0.0', () => {
-      console.error(`SERVER LIVE: http://localhost:${port}`);
+    app.listen(port, () => {
       console.error(`HISE MCP server running in production mode on port ${port}`);
       console.error(`MCP endpoint: http://localhost:${port}/mcp`);
     });
@@ -616,7 +601,6 @@ const isProduction =
       process.exit(0);
     });
   } else {
-    console.error("DEBUG: No production flag. Arguments were:", JSON.stringify(args));
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error('HISE MCP server started in local mode (stdio)');
