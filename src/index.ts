@@ -470,11 +470,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  console.error("DEBUG: main() started");
   dataLoader = new HISEDataLoader();
   await dataLoader.loadData();
 
   const args = process.argv.slice(2);
-  const isProduction = args.includes('--production') || args.includes('-p');
+  const isProduction = args.includes('--production') || args.includes('-p') || process.env.PORT;
   const port = parseInt(process.env.PORT || '3000', 10);
 
   if (isProduction) {
